@@ -11,24 +11,47 @@ async function createFixtureRoots() {
   const root = await mkdtemp(path.join(tmpdir(), "service-lasso-app-node-"));
   const siblingRoot = path.join(root, "siblings");
   const adminDistRoot = path.join(siblingRoot, "lasso-@serviceadmin", "dist");
-  const echoServiceRepoRoot = path.join(siblingRoot, "lasso-echoservice");
   const sourceServicesRoot = path.join(root, "service-lasso-app-node", "services");
 
   await mkdir(adminDistRoot, { recursive: true });
-  await mkdir(echoServiceRepoRoot, { recursive: true });
   await mkdir(path.join(sourceServicesRoot, "echo-service"), { recursive: true });
   await mkdir(path.join(sourceServicesRoot, "service-admin"), { recursive: true });
   await writeFile(path.join(adminDistRoot, "index.html"), "<!doctype html><title>admin</title>", "utf8");
   await writeFile(path.join(adminDistRoot, "asset.js"), "console.log('admin asset');", "utf8");
-  await writeFile(path.join(echoServiceRepoRoot, "service.json"), "{\n  \"id\": \"echo-service\"\n}\n", "utf8");
-  await writeFile(path.join(sourceServicesRoot, "echo-service", "service.json"), "{\n  \"id\": \"echo-service\"\n}\n", "utf8");
+  await writeFile(
+    path.join(sourceServicesRoot, "echo-service", "service.json"),
+    JSON.stringify(
+      {
+        id: "echo-service",
+        artifact: {
+          kind: "archive",
+          source: {
+            type: "github-release",
+            repo: "service-lasso/lasso-echoservice",
+            tag: "fixture",
+          },
+          platforms: {
+            [process.platform]: {
+              assetName: "echo-service.zip",
+              assetUrl: "http://127.0.0.1:9999/echo-service.zip",
+              archiveType: process.platform === "win32" ? "zip" : "tar.gz",
+              command: process.platform === "win32" ? "./echo-service.exe" : "./echo-service",
+              args: [],
+            },
+          },
+        },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
   await writeFile(path.join(sourceServicesRoot, "service-admin", "service.json"), "{\n  \"id\": \"service-admin\"\n}\n", "utf8");
 
   return {
     root,
     siblingRoot,
     adminDistRoot,
-    echoServiceRepoRoot,
     sourceServicesRoot,
   };
 }
@@ -48,7 +71,6 @@ test("app-node config resolves deterministic sibling repo paths", async () => {
     assert.equal(config.runtimeUrl, "http://127.0.0.1:18181");
     assert.equal(config.adminDistRoot, fixture.adminDistRoot);
     assert.equal(config.sourceServicesRoot, fixture.sourceServicesRoot);
-    assert.equal(config.echoServiceRepoRoot, fixture.echoServiceRepoRoot);
 
     await assert.doesNotReject(() => validateAppNodeConfig(config));
   } finally {
@@ -71,7 +93,7 @@ test("host server serves shell, host status, and mounted admin assets", async ()
     const status = createHostStatus(config);
     assert.equal(status.app, "@service-lasso/service-lasso-app-node");
     assert.equal(status.sourceServicesRoot, fixture.sourceServicesRoot);
-    assert.equal(status.echoServiceRepoRoot, fixture.echoServiceRepoRoot);
+    assert.equal(status.artifactMode, "bootstrap-download");
 
     const server = createHostServer(config);
     server.listen(0, "127.0.0.1");
@@ -94,6 +116,7 @@ test("host server serves shell, host status, and mounted admin assets", async ()
       assert.equal(statusBody.runtimeUrl, config.runtimeUrl);
       assert.equal(statusBody.adminDistRoot, fixture.adminDistRoot);
       assert.equal(statusBody.sourceServicesRoot, fixture.sourceServicesRoot);
+      assert.equal(statusBody.artifactMode, "bootstrap-download");
 
       const assetResponse = await fetch(`${baseUrl}/admin/asset.js`);
       assert.equal(assetResponse.status, 200);

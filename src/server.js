@@ -198,14 +198,14 @@ export function createHostStatus(config) {
     servicesRoot: config.servicesRoot,
     sourceServicesRoot: config.sourceServicesRoot,
     workspaceRoot: config.workspaceRoot,
-    echoServiceRepoRoot: config.echoServiceRepoRoot,
     adminDistRoot: config.adminDistRoot,
+    artifactMode: "bootstrap-download",
     notes: [
       "Host-owned shell is served at /.",
       "Service Admin is mounted from the sibling built dist under /admin/.",
       "Runtime is expected on the fixed port baked into the current admin build.",
       "Tracked services/ definitions are copied into the prepared servicesRoot before runtime startup.",
-      "A local Echo Service runner is generated into the prepared servicesRoot.",
+      "Echo Service install/start now relies on manifest-owned archive metadata instead of a generated local wrapper.",
     ],
   };
 }

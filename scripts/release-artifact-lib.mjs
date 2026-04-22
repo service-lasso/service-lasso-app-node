@@ -1,10 +1,12 @@
 import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
-const CANDIDATE_RELEASE_PATHS = [
+const SOURCE_RELEASE_PATHS = [
   ".gitignore",
   ".npmrc",
   ".github",
@@ -12,12 +14,23 @@ const CANDIDATE_RELEASE_PATHS = [
   "package.json",
   "package-lock.json",
   "src",
-  "src-tauri",
   "services",
   "docs",
   "scripts",
   "tests",
 ];
+
+const RUNTIME_RELEASE_PATHS = [
+  ".npmrc",
+  "README.md",
+  "package.json",
+  "package-lock.json",
+  "src",
+  "services",
+  "docs",
+];
+
+const NPM_COMMAND = process.platform === "win32" ? "npm.cmd" : "npm";
 
 export async function readRootPackageJson(repoRoot) {
   return JSON.parse(await readFile(path.join(repoRoot, "package.json"), "utf8"));
@@ -28,7 +41,7 @@ export async function getReleaseVersion(repoRoot) {
   return packageJson.version;
 }
 
-export async function getArtifactName(repoRoot, version) {
+export async function getArtifactNameBase(repoRoot, version) {
   const packageJson = await readRootPackageJson(repoRoot);
   const packageSuffix = packageJson.name.split("/").at(-1);
   return `${packageSuffix}-${version}`;
@@ -43,19 +56,27 @@ async function pathExists(targetPath) {
   }
 }
 
-export async function getReleaseFiles(repoRoot) {
-  const releaseFiles = [];
+async function listExistingPaths(repoRoot, candidates) {
+  const existing = [];
 
-  for (const relativePath of CANDIDATE_RELEASE_PATHS) {
+  for (const relativePath of candidates) {
     if (await pathExists(path.join(repoRoot, relativePath))) {
-      releaseFiles.push(relativePath);
+      existing.push(relativePath);
     }
   }
 
-  return releaseFiles;
+  return existing;
 }
 
-async function runCommand(command, args, options = {}) {
+function escapeWindowsCmdArg(value) {
+  if (/^[A-Za-z0-9_./:=@\\-]+$/.test(value)) {
+    return value;
+  }
+
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function runCommand(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],
@@ -89,16 +110,6 @@ async function runCommand(command, args, options = {}) {
   });
 }
 
-const NPM_COMMAND = process.platform === "win32" ? "npm.cmd" : "npm";
-
-function escapeWindowsCmdArg(value) {
-  if (/^[A-Za-z0-9_./:=@\\-]+$/.test(value)) {
-    return value;
-  }
-
-  return `"${value.replace(/"/g, '""')}"`;
-}
-
 async function runNpmCommand(args, options = {}) {
   if (process.platform !== "win32") {
     return runCommand(NPM_COMMAND, args, options);
@@ -106,7 +117,6 @@ async function runNpmCommand(args, options = {}) {
 
   const comspec = process.env.ComSpec ?? "cmd.exe";
   const commandLine = [NPM_COMMAND, ...args].map(escapeWindowsCmdArg).join(" ");
-
   return runCommand(comspec, ["/d", "/s", "/c", commandLine], options);
 }
 
@@ -116,30 +126,6 @@ async function copyReleasePath(repoRoot, artifactRoot, relativePath) {
 
   await mkdir(path.dirname(targetPath), { recursive: true });
   await cp(sourcePath, targetPath, { recursive: true });
-}
-
-async function writeReleaseManifest({ repoRoot, artifactRoot, artifactName, version, releaseFiles }) {
-  const packageJson = await readRootPackageJson(repoRoot);
-  const manifest = {
-    artifactName,
-    version,
-    packageName: packageJson.name,
-    artifactKind: "starter-template-source",
-    shippedFiles: releaseFiles,
-    entrypoint: "src/index.js",
-    notes: [
-      "This artifact is a starter-template source bundle.",
-      "It is not yet a built production application artifact.",
-    ],
-  };
-
-  await writeFile(
-    path.join(artifactRoot, "release-artifact.json"),
-    `${JSON.stringify(manifest, null, 2)}\n`,
-    "utf8",
-  );
-
-  return manifest;
 }
 
 async function createReleaseArchive(outputRoot, artifactName) {
@@ -165,13 +151,10 @@ async function getLocalCorePackageArchive(repoRoot) {
     const version = corePackageJson.version;
     const artifactRoot = path.join(coreRepoRoot, "artifacts", "npm", `service-lasso-package-${version}`);
     const archivePath = path.join(artifactRoot, `service-lasso-service-lasso-${version}.tgz`);
-
-    if (!(await pathExists(archivePath))) {
-      await runNpmCommand(["run", "package:stage"], {
-        cwd: coreRepoRoot,
-        env: process.env,
-      });
-    }
+    await runNpmCommand(["run", "package:stage"], {
+      cwd: coreRepoRoot,
+      env: process.env,
+    });
 
     await stat(archivePath);
     return archivePath;
@@ -197,45 +180,86 @@ async function installStarterDependencies(stagedRoot, repoRoot) {
   });
 }
 
-async function createVerificationSiblingFixtures(stagedRoot) {
-  const siblingRoot = path.resolve(stagedRoot, "..");
-  const adminDistRoot = path.join(siblingRoot, "lasso-@serviceadmin", "dist");
-  const servicesRoot = path.join(siblingRoot, "services");
-  const echoServiceRoot = path.join(servicesRoot, "echo-service");
-  const serviceAdminRoot = path.join(servicesRoot, "service-admin");
+async function writeReleaseManifest({
+  repoRoot,
+  artifactRoot,
+  artifactName,
+  version,
+  artifactKind,
+  shippedFiles,
+  notes,
+}) {
+  const packageJson = await readRootPackageJson(repoRoot);
+  const manifest = {
+    artifactName,
+    version,
+    packageName: packageJson.name,
+    artifactKind,
+    shippedFiles,
+    entrypoint: "src/index.js",
+    startCommand: "npm start",
+    notes,
+  };
 
-  await mkdir(adminDistRoot, { recursive: true });
-  await mkdir(echoServiceRoot, { recursive: true });
-  await mkdir(serviceAdminRoot, { recursive: true });
-  await writeFile(path.join(adminDistRoot, "index.html"), "<!doctype html><title>serviceadmin</title>", "utf8");
   await writeFile(
-    path.join(echoServiceRoot, "service.json"),
-    `${JSON.stringify(
-      {
-        id: "echo-service",
-        name: "Echo Service",
-        description: "Verification harness service for the starter artifact.",
-        version: "0.0.0",
-        enabled: true,
-        executable: "node",
-        args: ["-e", "setInterval(() => {}, 1000);"],
-        healthcheck: {
-          type: "process",
-        },
-      },
-      null,
-      2,
-    )}\n`,
+    path.join(artifactRoot, "release-artifact.json"),
+    `${JSON.stringify(manifest, null, 2)}\n`,
     "utf8",
   );
-  await writeFile(path.join(serviceAdminRoot, "service.json"), "{\n  \"id\": \"service-admin\"\n}\n", "utf8");
+
+  return manifest;
+}
+
+async function stageSingleArtifact({
+  repoRoot,
+  outputRoot,
+  artifactName,
+  version,
+  artifactKind,
+  relativePaths,
+  notes,
+  installDependencies = false,
+  adminDistRoot = null,
+}) {
+  const artifactRoot = path.join(outputRoot, artifactName);
+  await rm(artifactRoot, { recursive: true, force: true });
+  await mkdir(outputRoot, { recursive: true });
+
+  for (const relativePath of relativePaths) {
+    await copyReleasePath(repoRoot, artifactRoot, relativePath);
+  }
+
+  if (installDependencies) {
+    await installStarterDependencies(artifactRoot, repoRoot);
+  }
+
+  if (adminDistRoot) {
+    const payloadAdminRoot = path.join(artifactRoot, ".payload", "admin");
+    await mkdir(path.dirname(payloadAdminRoot), { recursive: true });
+    await cp(adminDistRoot, payloadAdminRoot, { recursive: true });
+  }
+
+  const manifest = await writeReleaseManifest({
+    repoRoot,
+    artifactRoot,
+    artifactName,
+    version,
+    artifactKind,
+    shippedFiles: [
+      ...relativePaths,
+      ...(installDependencies ? ["node_modules"] : []),
+      ...(adminDistRoot ? [".payload"] : []),
+      "release-artifact.json",
+    ],
+    notes,
+  });
+  const archivePath = await createReleaseArchive(outputRoot, artifactName);
 
   return {
-    siblingRoot,
-    servicesRoot,
-    adminDistRoot,
-    echoServiceRoot,
-    serviceAdminRoot,
+    artifactName,
+    artifactRoot,
+    archivePath,
+    manifest,
   };
 }
 
@@ -246,7 +270,6 @@ function sleep(ms) {
 async function reserveLoopbackPort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
-
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
@@ -275,7 +298,6 @@ async function waitForJson(url, timeoutMs = 15000) {
   while (Date.now() - startedAt < timeoutMs) {
     try {
       const response = await fetch(url);
-
       if (response.ok) {
         return await response.json();
       }
@@ -289,6 +311,139 @@ async function waitForJson(url, timeoutMs = 15000) {
   }
 
   throw lastError ?? new Error(`timed out waiting for ${url}`);
+}
+
+async function postJson(url) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: "{}",
+  });
+
+  let body = null;
+  try {
+    body = await response.json();
+  } catch {}
+
+  return {
+    status: response.status,
+    body,
+  };
+}
+
+async function createVerificationAdminDist(rootDir) {
+  const adminDistRoot = path.join(rootDir, "lasso-@serviceadmin", "dist");
+  await mkdir(adminDistRoot, { recursive: true });
+  await writeFile(path.join(adminDistRoot, "index.html"), "<!doctype html><title>serviceadmin</title>", "utf8");
+  await writeFile(path.join(adminDistRoot, "asset.js"), "console.log('serviceadmin asset');", "utf8");
+  return adminDistRoot;
+}
+
+async function createVerificationReleaseFixture(rootDir) {
+  const fixtureRoot = path.join(rootDir, ".verify-fixture");
+  const workRoot = path.join(fixtureRoot, "work");
+  const archiveRoot = path.join(fixtureRoot, "archives");
+  await mkdir(workRoot, { recursive: true });
+  await mkdir(archiveRoot, { recursive: true });
+  await writeFile(path.join(workRoot, "README.md"), "fixture\n", "utf8");
+
+  let assetName;
+  let archiveType;
+  if (process.platform === "win32") {
+    assetName = "echo-service-win32.zip";
+    archiveType = "zip";
+    const powershell =
+      process.env.SystemRoot
+        ? path.join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+        : "powershell.exe";
+    await runCommand(powershell, [
+      "-NoLogo",
+      "-NoProfile",
+      "-Command",
+      `Compress-Archive -Path '${path.join(workRoot, "*").replace(/'/g, "''")}' -DestinationPath '${path.join(archiveRoot, assetName).replace(/'/g, "''")}' -Force`,
+    ]);
+  } else {
+    assetName = process.platform === "darwin" ? "echo-service-darwin.tar.gz" : "echo-service-linux.tar.gz";
+    archiveType = "tar.gz";
+    await runCommand("tar", ["-czf", path.join(archiveRoot, assetName), "-C", workRoot, "."]);
+  }
+
+  const archivePath = path.join(archiveRoot, assetName);
+  return {
+    fixtureRoot,
+    assetName,
+    archiveType,
+    archivePath,
+  };
+}
+
+async function startArchiveServer(fixture) {
+  let requestCount = 0;
+  const server = createServer(async (request, response) => {
+    if (request.url !== `/${fixture.assetName}`) {
+      response.statusCode = 404;
+      response.end("not found");
+      return;
+    }
+
+    requestCount += 1;
+    const bytes = await readFile(fixture.archivePath);
+    response.statusCode = 200;
+    response.setHeader("content-type", "application/octet-stream");
+    response.end(bytes);
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("failed to start archive fixture server");
+  }
+
+  return {
+    url: `http://127.0.0.1:${address.port}/${fixture.assetName}`,
+    getRequestCount() {
+      return requestCount;
+    },
+    async close() {
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
+async function createVerificationSourceServicesRoot(stagedRoot, archiveServer, fixture) {
+  const sourceServicesRoot = path.join(stagedRoot, ".verify-source-services");
+  await rm(sourceServicesRoot, { recursive: true, force: true });
+  await cp(path.join(stagedRoot, "services"), sourceServicesRoot, { recursive: true });
+
+  const manifestPath = path.join(sourceServicesRoot, "echo-service", "service.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  manifest.version = "fixture";
+  manifest.artifact = {
+    kind: "archive",
+    source: {
+      type: "github-release",
+      repo: "service-lasso/lasso-echoservice",
+      tag: "fixture",
+    },
+    platforms: {
+      [process.platform]: {
+        assetName: fixture.assetName,
+        assetUrl: archiveServer.url,
+        archiveType: fixture.archiveType,
+        command: process.platform === "win32" ? "./echo-service.exe" : "./echo-service",
+        args: [],
+      },
+    },
+  };
+
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  return sourceServicesRoot;
 }
 
 async function smokeStarterHost(stagedRoot, env) {
@@ -332,11 +487,7 @@ async function smokeStarterHost(stagedRoot, env) {
     });
 
     child.on("close", (code) => {
-      if (settled) {
-        return;
-      }
-
-      if (shutdownExpected) {
+      if (settled || shutdownExpected) {
         return;
       }
 
@@ -352,27 +503,16 @@ async function smokeStarterHost(stagedRoot, env) {
         const hostStatus = await waitForJson(`http://127.0.0.1:${env.SERVICE_LASSO_APP_NODE_HOST_PORT}/api/host-status`);
         const runtimeHealth = await waitForJson(`http://127.0.0.1:${env.SERVICE_LASSO_API_PORT}/api/health`);
 
-        shutdownExpected = true;
-        child.kill("SIGINT");
-        const { code, signal } = await closePromise;
-
-        finish(() => {
-          if (code !== 0 && signal !== "SIGINT" && signal !== "SIGTERM") {
-            reject(
-              new Error(
-                `${process.execPath} ${entrypoint} exited with code ${code} and signal ${signal}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
-              ),
-            );
-            return;
-          }
-
+        finish(() =>
           resolve({
+            child,
+            closePromise,
             stdout,
             stderr,
             hostStatus,
             runtimeHealth,
-          });
-        });
+          }),
+        );
       } catch (error) {
         shutdownExpected = true;
         child.kill("SIGTERM");
@@ -382,78 +522,161 @@ async function smokeStarterHost(stagedRoot, env) {
   });
 }
 
-export async function stageReleaseArtifact({ repoRoot, outputRoot = path.join(repoRoot, "artifacts"), version } = {}) {
-  const resolvedVersion = version ?? (await getReleaseVersion(repoRoot));
-  const artifactName = await getArtifactName(repoRoot, resolvedVersion);
-  const artifactRoot = path.join(outputRoot, artifactName);
-  const releaseFiles = await getReleaseFiles(repoRoot);
-
-  await rm(artifactRoot, { recursive: true, force: true });
-  await mkdir(outputRoot, { recursive: true });
-
-  for (const relativePath of releaseFiles) {
-    await copyReleasePath(repoRoot, artifactRoot, relativePath);
-  }
-
-  const manifest = await writeReleaseManifest({
-    repoRoot,
-    artifactRoot,
-    artifactName,
-    version: resolvedVersion,
-    releaseFiles,
-  });
-  const archivePath = await createReleaseArchive(outputRoot, artifactName);
-
-  return {
-    artifactName,
-    artifactRoot,
-    archivePath,
-    manifest,
-  };
+async function shutdownSmokedHost(smoke, signal = "SIGINT") {
+  smoke.child.kill(signal);
+  return smoke.closePromise;
 }
 
-export async function verifyStagedArtifact({ repoRoot, artifactRoot, archivePath, version } = {}) {
-  const resolvedVersion = version ?? (await getReleaseVersion(repoRoot));
-  const artifactName = await getArtifactName(repoRoot, resolvedVersion);
-  const stagedRoot = artifactRoot ?? path.join(repoRoot, "artifacts", artifactName);
-  const stagedArchivePath = archivePath ?? path.join(repoRoot, "artifacts", `${artifactName}.tar.gz`);
-  const releaseFiles = await getReleaseFiles(repoRoot);
+async function verifySourceArtifact({ repoRoot, artifactRoot, archivePath }) {
+  await stat(archivePath);
+  await stat(path.join(artifactRoot, "release-artifact.json"));
 
-  await stat(stagedArchivePath);
-  await stat(path.join(stagedRoot, "release-artifact.json"));
-
-  for (const relativePath of releaseFiles) {
-    await stat(path.join(stagedRoot, relativePath));
-  }
-
-  const packageJson = await readRootPackageJson(repoRoot);
-  const expectedNeedle = packageJson.name.split("/").at(-1);
-  const fixtures = await createVerificationSiblingFixtures(stagedRoot);
+  const adminDistRoot = await createVerificationAdminDist(path.resolve(artifactRoot, ".."));
+  await installStarterDependencies(artifactRoot, repoRoot);
   const hostPort = await reserveLoopbackPort();
   const runtimePort = await reserveLoopbackPort();
-  await installStarterDependencies(stagedRoot, repoRoot);
-  const result = await smokeStarterHost(stagedRoot, {
-      ...process.env,
-      SERVICE_LASSO_APP_NODE_HOST_PORT: hostPort,
-      SERVICE_LASSO_API_PORT: runtimePort,
-      SERVICE_LASSO_APP_NODE_ADMIN_DIST_ROOT: fixtures.adminDistRoot,
-      SERVICE_LASSO_APP_NODE_ECHO_SERVICE_REPO_ROOT: fixtures.echoServiceRoot,
-      SERVICE_LASSO_SERVICES_ROOT: fixtures.servicesRoot,
-      SERVICE_LASSO_WORKSPACE_ROOT: path.join(stagedRoot, ".workspace", "runtime"),
-    });
+  const smoke = await smokeStarterHost(artifactRoot, {
+    ...process.env,
+    SERVICE_LASSO_APP_NODE_HOST_PORT: hostPort,
+    SERVICE_LASSO_API_PORT: runtimePort,
+    SERVICE_LASSO_APP_NODE_ADMIN_DIST_ROOT: adminDistRoot,
+    SERVICE_LASSO_WORKSPACE_ROOT: path.join(artifactRoot, ".workspace", "runtime"),
+  });
 
-  if (!result.stdout.includes(expectedNeedle)) {
-    throw new Error(`staged starter output did not include expected repo marker: ${expectedNeedle}`);
+  try {
+    return {
+      smoke: smoke.stdout,
+      hostStatus: smoke.hostStatus,
+      runtimeHealth: smoke.runtimeHealth,
+    };
+  } finally {
+    await shutdownSmokedHost(smoke, "SIGINT");
   }
+}
+
+async function verifyRuntimeArtifact({ artifactRoot, archivePath }) {
+  await stat(archivePath);
+  await stat(path.join(artifactRoot, "release-artifact.json"));
+  await stat(path.join(artifactRoot, "node_modules"));
+  await stat(path.join(artifactRoot, ".payload", "admin", "index.html"));
+
+  const fixture = await createVerificationReleaseFixture(artifactRoot);
+  const archiveServer = await startArchiveServer(fixture);
+  const sourceServicesRoot = await createVerificationSourceServicesRoot(artifactRoot, archiveServer, fixture);
+  const hostPort = await reserveLoopbackPort();
+  const runtimePort = await reserveLoopbackPort();
+  const smoke = await smokeStarterHost(artifactRoot, {
+    ...process.env,
+    SERVICE_LASSO_APP_NODE_HOST_PORT: hostPort,
+    SERVICE_LASSO_API_PORT: runtimePort,
+    SERVICE_LASSO_APP_NODE_SOURCE_SERVICES_ROOT: sourceServicesRoot,
+    SERVICE_LASSO_WORKSPACE_ROOT: path.join(artifactRoot, ".workspace", "runtime"),
+  });
+
+  try {
+    const runtimeUrl = `http://127.0.0.1:${runtimePort}`;
+    const install = await postJson(`${runtimeUrl}/api/services/echo-service/install`);
+
+    if (install.status !== 200) {
+      throw new Error(`Install action failed: ${JSON.stringify(install, null, 2)}`);
+    }
+
+    if (archiveServer.getRequestCount() < 1) {
+      throw new Error("Bootstrap-download runtime artifact did not fetch the service archive during install.");
+    }
+
+    const serviceDetail = await waitForJson(`${runtimeUrl}/api/services/echo-service`);
+    return {
+      hostStatus: smoke.hostStatus,
+      runtimeHealth: smoke.runtimeHealth,
+      archiveDownloads: archiveServer.getRequestCount(),
+      installStatus: install.status,
+      lifecycleState: serviceDetail.lifecycleState ?? null,
+    };
+  } finally {
+    await shutdownSmokedHost(smoke, "SIGINT");
+    await archiveServer.close();
+    await rm(fixture.fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+export async function stageReleaseArtifacts({ repoRoot, outputRoot = path.join(repoRoot, "artifacts"), version, sourceAdminDistRoot } = {}) {
+  const resolvedVersion = version ?? (await getReleaseVersion(repoRoot));
+  const baseName = await getArtifactNameBase(repoRoot, resolvedVersion);
+  const sourceFiles = await listExistingPaths(repoRoot, SOURCE_RELEASE_PATHS);
+  const runtimeFiles = await listExistingPaths(repoRoot, RUNTIME_RELEASE_PATHS);
+  const resolvedAdminDistRoot =
+    sourceAdminDistRoot ??
+    process.env.SERVICE_LASSO_APP_NODE_ADMIN_DIST_ROOT ??
+    (existsSync(path.resolve(repoRoot, "..", "lasso-@serviceadmin", "dist"))
+      ? path.resolve(repoRoot, "..", "lasso-@serviceadmin", "dist")
+      : null);
+
+  const source = await stageSingleArtifact({
+    repoRoot,
+    outputRoot,
+    artifactName: `${baseName}-source`,
+    version: resolvedVersion,
+    artifactKind: "starter-template-source",
+    relativePaths: sourceFiles,
+    notes: [
+      "This artifact is the source template for the app-node starter.",
+      "It keeps the tracked services/ inventory but does not include installed dependencies or bundled runtime payloads.",
+    ],
+  });
+
+  const runtime = await stageSingleArtifact({
+    repoRoot,
+    outputRoot,
+    artifactName: `${baseName}-runtime`,
+    version: resolvedVersion,
+    artifactKind: "runnable-bootstrap-download",
+    relativePaths: runtimeFiles,
+    notes: [
+      "This artifact is ready to run with installed dependencies and bundled Service Admin assets.",
+      "It keeps the canonical services/ inventory and installs the Echo Service archive from manifest-owned metadata before use.",
+    ],
+    installDependencies: true,
+    adminDistRoot: resolvedAdminDistRoot,
+  });
 
   return {
-    artifactName,
-    stagedRoot,
-    stagedArchivePath,
-    smoke: result.stdout,
+    version: resolvedVersion,
+    baseName,
+    artifacts: {
+      source,
+      runtime,
+    },
   };
 }
 
-export async function createTemporaryOutputRoot(prefix = "service-lasso-template-release-") {
+export async function verifyStagedArtifacts({ repoRoot, staged } = {}) {
+  const release = staged ?? (await stageReleaseArtifacts({ repoRoot }));
+  const sourceVerified = await verifySourceArtifact({
+    repoRoot,
+    artifactRoot: release.artifacts.source.artifactRoot,
+    archivePath: release.artifacts.source.archivePath,
+  });
+  const runtimeVerified = await verifyRuntimeArtifact({
+    artifactRoot: release.artifacts.runtime.artifactRoot,
+    archivePath: release.artifacts.runtime.archivePath,
+  });
+
+  return {
+    baseName: release.baseName,
+    artifacts: {
+      source: {
+        ...release.artifacts.source,
+        verification: sourceVerified,
+      },
+      runtime: {
+        ...release.artifacts.runtime,
+        verification: runtimeVerified,
+      },
+    },
+  };
+}
+
+export async function createTemporaryOutputRoot(prefix = "service-lasso-app-node-release-") {
   return mkdtemp(path.join(os.tmpdir(), prefix));
 }
