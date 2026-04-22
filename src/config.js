@@ -1,5 +1,6 @@
 import path from "node:path";
 import { access } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -15,7 +16,9 @@ export function resolveAppNodeConfig(options = {}) {
     options.adminDistRoot ??
     process.env.SERVICE_LASSO_APP_NODE_ADMIN_DIST_ROOT ??
     process.env.SERVICE_LASSO_PACKAGER_ADMIN_DIST_ROOT ??
-    path.join(siblingRoot, "lasso-@serviceadmin", "dist");
+    (existsSync(path.join(rootDir, ".payload", "admin"))
+      ? path.join(rootDir, ".payload", "admin")
+      : path.join(siblingRoot, "lasso-@serviceadmin", "dist"));
   const workspaceBaseRoot =
     options.workspaceBaseRoot ??
     process.env.SERVICE_LASSO_APP_NODE_WORKSPACE_BASE_ROOT ??
@@ -34,11 +37,6 @@ export function resolveAppNodeConfig(options = {}) {
     process.env.SERVICE_LASSO_APP_NODE_SOURCE_SERVICES_ROOT ??
     process.env.SERVICE_LASSO_PACKAGER_SOURCE_SERVICES_ROOT ??
     path.join(rootDir, "services");
-  const echoServiceRepoRoot =
-    options.echoServiceRepoRoot ??
-    process.env.SERVICE_LASSO_APP_NODE_ECHO_SERVICE_REPO_ROOT ??
-    process.env.SERVICE_LASSO_PACKAGER_ECHO_SERVICE_REPO_ROOT ??
-    path.join(siblingRoot, "lasso-echoservice");
 
   return {
     repoRoot: rootDir,
@@ -53,14 +51,12 @@ export function resolveAppNodeConfig(options = {}) {
     workspaceRoot,
     servicesRoot,
     sourceServicesRoot,
-    echoServiceRepoRoot,
   };
 }
 
 export async function validateAppNodeConfig(config) {
   await access(path.join(config.sourceServicesRoot, "echo-service", "service.json"));
   await access(path.join(config.sourceServicesRoot, "service-admin", "service.json"));
-  await access(path.join(config.echoServiceRepoRoot, "service.json"));
   await access(path.join(config.adminDistRoot, "index.html"));
   return config;
 }

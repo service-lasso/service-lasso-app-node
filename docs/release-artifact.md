@@ -1,12 +1,21 @@
-# Release artifact
+# Release artifacts
 
-This repo currently ships a bounded **starter-template source artifact**.
+This repo now ships two bounded release artifacts.
 
-That means the release file is intended to give downstream teams a downloadable starting repo shape, not a built production application.
+Each artifact has a different job:
+- source template
+- runnable bootstrap-download bundle
 
-## What ships
+## Source template
 
-The staged artifact includes the current starter-template source files:
+Artifact:
+- `service-lasso-app-node-<version>-source.tar.gz`
+
+Purpose:
+- give downstream teams a downloadable starter repo shape
+- keep tracked `services/` metadata in the template repo itself
+
+What ships:
 - `.gitignore`
 - `.npmrc`
 - `.github/`
@@ -14,18 +23,55 @@ The staged artifact includes the current starter-template source files:
 - `package.json`
 - `package-lock.json`
 - `src/`
+- `services/`
 - `docs/`
 - `scripts/`
 - `tests/`
 - generated `release-artifact.json`
 
-## What the artifact proves
+Honest label:
+- **starter-template source artifact**
 
-The artifact proves:
-- the template repo can be packaged repeatably
-- the packaged template contains the documented starter files
-- the staged starter can install the core runtime package and still run `npm start`
-- GitHub Actions can upload the artifact and attach the archive to the rolling `latest` release on `main`
+## Runnable bootstrap-download bundle
+
+Artifact:
+- `service-lasso-app-node-<version>-runtime.tar.gz`
+
+Purpose:
+- provide a ready-to-run plain-Node host with the core runtime already installed
+- include bundled Service Admin assets for the host shell
+- keep the canonical repo-owned `services/` inventory inside the artifact
+- prove that Echo Service is acquired from manifest-owned release metadata before use
+
+What ships:
+- `.npmrc`
+- `README.md`
+- `package.json`
+- `package-lock.json`
+- `src/`
+- `services/`
+- `docs/`
+- installed `node_modules/`
+- bundled admin assets under `.payload/admin/`
+- generated `release-artifact.json`
+
+How it works:
+- the app repo owns `services/echo-service/service.json`
+- that manifest carries the bounded `artifact` block pointing at the Echo Service release assets
+- on `install`, Service Lasso downloads and unpacks the matching archive from the manifest metadata
+- the app artifact itself does not ship the Echo Service archive preloaded
+
+Honest label:
+- **runnable bootstrap-download bundle**
+
+## What the release proves
+
+The release now proves:
+- the repo owns explicit tracked service metadata under `services/`
+- the plain-Node host can be packaged repeatably
+- the runnable artifact can boot Service Lasso and Service Admin without sibling-repo checkout tricks
+- Echo Service acquisition now depends on manifest-owned archive metadata instead of a generated local wrapper
+- bootstrap-download mode installs the service payload before first use
 
 ## Private package note
 
@@ -39,22 +85,20 @@ The repo `.npmrc` is included in the staged artifact so the starter knows which 
 
 ## Commands
 
-Stage the artifact:
+Stage the artifacts:
 
 ```bash
 npm run release:artifact
 ```
 
-Stage and verify the artifact:
+Stage and verify the artifacts:
 
 ```bash
 npm run release:verify
 ```
 
-## Honest current label
+## Current expectation
 
-This is a:
+Any application using Service Lasso should keep a tracked `services/` folder in its repo with the service metadata it intends to manage.
 
-**starter-template source artifact**
-
-It is not yet a built deployable web application artifact.
+This app-node starter now uses that tracked inventory directly for bootstrap-download behavior.

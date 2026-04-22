@@ -16,7 +16,7 @@ async function main() {
   console.log(`[app-node] servicesRoot=${config.servicesRoot}`);
   console.log(`[app-node] workspaceRoot=${config.workspaceRoot}`);
   const preparedServices = await prepareStarterServicesRoot(config);
-  console.log(`[app-node] prepared Echo Service wrapper at ${preparedServices.wrapperManifestPath}`);
+  console.log(`[app-node] prepared tracked services inventory at ${preparedServices.servicesRoot}`);
 
   const runtime = await startApiServer({
     port: config.runtimePort,

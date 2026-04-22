@@ -6,33 +6,34 @@ import { rm } from "node:fs/promises";
 import {
   createTemporaryOutputRoot,
   readRootPackageJson,
-  stageReleaseArtifact,
-  verifyStagedArtifact,
+  stageReleaseArtifacts,
+  verifyStagedArtifacts,
 } from "../scripts/release-artifact-lib.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-test("starter release artifact can be staged and verified", async () => {
+test("starter release artifacts can be staged and verified", async () => {
   const outputRoot = await createTemporaryOutputRoot();
 
   try {
     const packageJson = await readRootPackageJson(repoRoot);
     const packageSuffix = packageJson.name.split("/").at(-1);
-    const staged = await stageReleaseArtifact({
+    const staged = await stageReleaseArtifacts({
       repoRoot,
       outputRoot,
     });
 
-    assert.match(staged.artifactName, new RegExp(`^${packageSuffix}-\\d+\\.\\d+\\.\\d+$`));
-    assert.equal(staged.manifest.artifactKind, "starter-template-source");
+    assert.match(staged.baseName, new RegExp(`^${packageSuffix}-\\d+\\.\\d+\\.\\d+$`));
+    assert.equal(staged.artifacts.source.manifest.artifactKind, "starter-template-source");
+    assert.equal(staged.artifacts.runtime.manifest.artifactKind, "runnable-bootstrap-download");
 
-    const verified = await verifyStagedArtifact({
+    const verified = await verifyStagedArtifacts({
       repoRoot,
-      artifactRoot: staged.artifactRoot,
-      archivePath: staged.archivePath,
+      staged,
     });
 
-    assert.equal(verified.artifactName, staged.artifactName);
+    assert.equal(verified.baseName, staged.baseName);
+    assert.ok(verified.artifacts.runtime.verification.archiveDownloads >= 1);
   } finally {
     await rm(outputRoot, { recursive: true, force: true });
   }
