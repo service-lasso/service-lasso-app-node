@@ -151,6 +151,7 @@ async function getLocalCorePackageArchive(repoRoot) {
     const version = corePackageJson.version;
     const artifactRoot = path.join(coreRepoRoot, "artifacts", "npm", `service-lasso-package-${version}`);
     const archivePath = path.join(artifactRoot, `service-lasso-service-lasso-${version}.tgz`);
+    await rm(artifactRoot, { recursive: true, force: true });
     await runNpmCommand(["run", "package:stage"], {
       cwd: coreRepoRoot,
       env: process.env,
@@ -220,6 +221,7 @@ async function stageSingleArtifact({
   notes,
   installDependencies = false,
   adminDistRoot = null,
+  preloadedArchive = null,
 }) {
   const artifactRoot = path.join(outputRoot, artifactName);
   await rm(artifactRoot, { recursive: true, force: true });
@@ -237,6 +239,22 @@ async function stageSingleArtifact({
     const payloadAdminRoot = path.join(artifactRoot, ".payload", "admin");
     await mkdir(path.dirname(payloadAdminRoot), { recursive: true });
     await cp(adminDistRoot, payloadAdminRoot, { recursive: true });
+  }
+
+  if (preloadedArchive) {
+    const { releaseTag, assetName, archivePath } = preloadedArchive;
+    const targetPath = path.join(
+      artifactRoot,
+      ".workspace",
+      "services",
+      "echo-service",
+      ".state",
+      "artifacts",
+      releaseTag,
+      assetName,
+    );
+    await mkdir(path.dirname(targetPath), { recursive: true });
+    await cp(archivePath, targetPath, { force: true });
   }
 
   const manifest = await writeReleaseManifest({
@@ -341,7 +359,7 @@ async function createVerificationAdminDist(rootDir) {
   return adminDistRoot;
 }
 
-async function createVerificationReleaseFixture(rootDir) {
+async function createVerificationReleaseFixture(rootDir, assetNameOverride = null) {
   const fixtureRoot = path.join(rootDir, ".verify-fixture");
   const workRoot = path.join(fixtureRoot, "work");
   const archiveRoot = path.join(fixtureRoot, "archives");
@@ -352,7 +370,7 @@ async function createVerificationReleaseFixture(rootDir) {
   let assetName;
   let archiveType;
   if (process.platform === "win32") {
-    assetName = "echo-service-win32.zip";
+    assetName = assetNameOverride ?? "echo-service-win32.zip";
     archiveType = "zip";
     const powershell =
       process.env.SystemRoot
@@ -365,7 +383,7 @@ async function createVerificationReleaseFixture(rootDir) {
       `Compress-Archive -Path '${path.join(workRoot, "*").replace(/'/g, "''")}' -DestinationPath '${path.join(archiveRoot, assetName).replace(/'/g, "''")}' -Force`,
     ]);
   } else {
-    assetName = process.platform === "darwin" ? "echo-service-darwin.tar.gz" : "echo-service-linux.tar.gz";
+    assetName = assetNameOverride ?? (process.platform === "darwin" ? "echo-service-darwin.tar.gz" : "echo-service-linux.tar.gz");
     archiveType = "tar.gz";
     await runCommand("tar", ["-czf", path.join(archiveRoot, assetName), "-C", workRoot, "."]);
   }
@@ -373,6 +391,7 @@ async function createVerificationReleaseFixture(rootDir) {
   const archivePath = path.join(archiveRoot, assetName);
   return {
     fixtureRoot,
+    releaseTag: "fixture",
     assetName,
     archiveType,
     archivePath,
@@ -600,6 +619,65 @@ async function verifyRuntimeArtifact({ artifactRoot, archivePath }) {
   }
 }
 
+async function verifyPreloadedArtifact({ artifactRoot, archivePath }) {
+  await stat(archivePath);
+  await stat(path.join(artifactRoot, "release-artifact.json"));
+  await stat(path.join(artifactRoot, "node_modules"));
+  await stat(path.join(artifactRoot, ".payload", "admin", "index.html"));
+
+  const fixture = await createVerificationReleaseFixture(artifactRoot);
+  const archiveServer = await startArchiveServer(fixture);
+  const sourceServicesRoot = await createVerificationSourceServicesRoot(artifactRoot, archiveServer, fixture);
+  const preloadedArchivePath = path.join(
+    artifactRoot,
+    ".workspace",
+    "services",
+    "echo-service",
+    ".state",
+    "artifacts",
+    "fixture",
+    fixture.assetName,
+  );
+  await mkdir(path.dirname(preloadedArchivePath), { recursive: true });
+  await cp(fixture.archivePath, preloadedArchivePath, { force: true });
+
+  const hostPort = await reserveLoopbackPort();
+  const runtimePort = await reserveLoopbackPort();
+  const smoke = await smokeStarterHost(artifactRoot, {
+    ...process.env,
+    SERVICE_LASSO_APP_NODE_HOST_PORT: hostPort,
+    SERVICE_LASSO_API_PORT: runtimePort,
+    SERVICE_LASSO_APP_NODE_SOURCE_SERVICES_ROOT: sourceServicesRoot,
+    SERVICE_LASSO_WORKSPACE_ROOT: path.join(artifactRoot, ".workspace", "runtime"),
+  });
+
+  try {
+    const runtimeUrl = `http://127.0.0.1:${runtimePort}`;
+    const install = await postJson(`${runtimeUrl}/api/services/echo-service/install`);
+
+    if (install.status !== 200) {
+      throw new Error(`Install action failed: ${JSON.stringify(install, null, 2)}`);
+    }
+
+    if (archiveServer.getRequestCount() !== 0) {
+      throw new Error("Preloaded runtime artifact should not fetch the service archive during install.");
+    }
+
+    const serviceDetail = await waitForJson(`${runtimeUrl}/api/services/echo-service`);
+    return {
+      hostStatus: smoke.hostStatus,
+      runtimeHealth: smoke.runtimeHealth,
+      archiveDownloads: archiveServer.getRequestCount(),
+      installStatus: install.status,
+      lifecycleState: serviceDetail.lifecycleState ?? null,
+    };
+  } finally {
+    await shutdownSmokedHost(smoke, "SIGINT");
+    await archiveServer.close();
+    await rm(fixture.fixtureRoot, { recursive: true, force: true });
+  }
+}
+
 export async function stageReleaseArtifacts({ repoRoot, outputRoot = path.join(repoRoot, "artifacts"), version, sourceAdminDistRoot } = {}) {
   const resolvedVersion = version ?? (await getReleaseVersion(repoRoot));
   const baseName = await getArtifactNameBase(repoRoot, resolvedVersion);
@@ -640,12 +718,37 @@ export async function stageReleaseArtifacts({ repoRoot, outputRoot = path.join(r
     adminDistRoot: resolvedAdminDistRoot,
   });
 
+  const echoManifest = JSON.parse(await readFile(path.join(repoRoot, "services", "echo-service", "service.json"), "utf8"));
+  const echoPlatform = echoManifest.artifact?.platforms?.[process.platform] ?? echoManifest.artifact?.platforms?.default;
+  const preloadedFixture = await createVerificationReleaseFixture(outputRoot, echoPlatform?.assetName ?? null);
+  const preloaded = await stageSingleArtifact({
+    repoRoot,
+    outputRoot,
+    artifactName: `${baseName}-preloaded`,
+    version: resolvedVersion,
+    artifactKind: "runnable-preloaded",
+    relativePaths: runtimeFiles,
+    notes: [
+      "This artifact is ready to run with installed dependencies, bundled Service Admin assets, and a preseeded Echo Service archive.",
+      "It keeps the canonical services/ inventory and proves no first-run service download is required.",
+    ],
+    installDependencies: true,
+    adminDistRoot: resolvedAdminDistRoot,
+    preloadedArchive: {
+      releaseTag: echoManifest.artifact?.source?.tag ?? preloadedFixture.releaseTag,
+      assetName: preloadedFixture.assetName,
+      archivePath: preloadedFixture.archivePath,
+    },
+  });
+  await rm(preloadedFixture.fixtureRoot, { recursive: true, force: true });
+
   return {
     version: resolvedVersion,
     baseName,
     artifacts: {
       source,
       runtime,
+      preloaded,
     },
   };
 }
@@ -661,6 +764,10 @@ export async function verifyStagedArtifacts({ repoRoot, staged } = {}) {
     artifactRoot: release.artifacts.runtime.artifactRoot,
     archivePath: release.artifacts.runtime.archivePath,
   });
+  const preloadedVerified = await verifyPreloadedArtifact({
+    artifactRoot: release.artifacts.preloaded.artifactRoot,
+    archivePath: release.artifacts.preloaded.archivePath,
+  });
 
   return {
     baseName: release.baseName,
@@ -672,6 +779,10 @@ export async function verifyStagedArtifacts({ repoRoot, staged } = {}) {
       runtime: {
         ...release.artifacts.runtime,
         verification: runtimeVerified,
+      },
+      preloaded: {
+        ...release.artifacts.preloaded,
+        verification: preloadedVerified,
       },
     },
   };
