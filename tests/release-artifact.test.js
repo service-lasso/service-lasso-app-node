@@ -26,6 +26,7 @@ test("starter release artifacts can be staged and verified", async () => {
     assert.match(staged.baseName, new RegExp(`^${packageSuffix}-\\d+\\.\\d+\\.\\d+$`));
     assert.equal(staged.artifacts.source.manifest.artifactKind, "starter-template-source");
     assert.equal(staged.artifacts.runtime.manifest.artifactKind, "runnable-bootstrap-download");
+    assert.equal(staged.artifacts.preloaded.manifest.artifactKind, "runnable-preloaded");
 
     const verified = await verifyStagedArtifacts({
       repoRoot,
@@ -34,6 +35,7 @@ test("starter release artifacts can be staged and verified", async () => {
 
     assert.equal(verified.baseName, staged.baseName);
     assert.ok(verified.artifacts.runtime.verification.archiveDownloads >= 1);
+    assert.equal(verified.artifacts.preloaded.verification.archiveDownloads, 0);
   } finally {
     await rm(outputRoot, { recursive: true, force: true });
   }
