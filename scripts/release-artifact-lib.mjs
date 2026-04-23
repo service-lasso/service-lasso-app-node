@@ -610,12 +610,14 @@ async function verifyRuntimeArtifact({ artifactRoot, archivePath }) {
   const fixture = await createVerificationReleaseFixture(artifactRoot);
   const archiveServer = await startArchiveServer(fixture);
   const sourceServicesRoot = await createVerificationSourceServicesRoot(artifactRoot, archiveServer, fixture);
+  const runtimeServicesRoot = path.join(artifactRoot, ".verify-runtime-services");
   const hostPort = await reserveLoopbackPort();
   const runtimePort = await reserveLoopbackPort();
   const smoke = await smokeStarterHost(artifactRoot, {
     ...process.env,
     SERVICE_LASSO_APP_NODE_HOST_PORT: hostPort,
     SERVICE_LASSO_API_PORT: runtimePort,
+    SERVICE_LASSO_SERVICES_ROOT: runtimeServicesRoot,
     SERVICE_LASSO_APP_NODE_SOURCE_SERVICES_ROOT: sourceServicesRoot,
     SERVICE_LASSO_WORKSPACE_ROOT: path.join(artifactRoot, ".workspace", "runtime"),
   });
@@ -656,10 +658,9 @@ async function verifyPreloadedArtifact({ artifactRoot, archivePath }) {
   const fixture = await createVerificationReleaseFixture(artifactRoot);
   const archiveServer = await startArchiveServer(fixture);
   const sourceServicesRoot = await createVerificationSourceServicesRoot(artifactRoot, archiveServer, fixture);
+  const runtimeServicesRoot = path.join(artifactRoot, ".verify-runtime-services");
   const preloadedArchivePath = path.join(
-    artifactRoot,
-    ".workspace",
-    "services",
+    runtimeServicesRoot,
     "echo-service",
     ".state",
     "artifacts",
@@ -675,6 +676,7 @@ async function verifyPreloadedArtifact({ artifactRoot, archivePath }) {
     ...process.env,
     SERVICE_LASSO_APP_NODE_HOST_PORT: hostPort,
     SERVICE_LASSO_API_PORT: runtimePort,
+    SERVICE_LASSO_SERVICES_ROOT: runtimeServicesRoot,
     SERVICE_LASSO_APP_NODE_SOURCE_SERVICES_ROOT: sourceServicesRoot,
     SERVICE_LASSO_WORKSPACE_ROOT: path.join(artifactRoot, ".workspace", "runtime"),
   });
