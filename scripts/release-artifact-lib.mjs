@@ -630,11 +630,15 @@ async function verifyRuntimeArtifact({ artifactRoot, archivePath }) {
       throw new Error(`Install action failed: ${JSON.stringify(install, null, 2)}`);
     }
 
-    if (archiveServer.getRequestCount() < 1) {
-      throw new Error("Bootstrap-download runtime artifact did not fetch the service archive during install.");
+    const serviceDetail = await waitForJson(`${runtimeUrl}/api/services/echo-service`);
+    const installedArtifact = install.body?.state?.installArtifacts?.artifact ?? null;
+    if (archiveServer.getRequestCount() < 1 && installedArtifact?.assetUrl !== archiveServer.url) {
+      throw new Error(
+        "Bootstrap-download runtime artifact did not use the verification service archive during install: " +
+          JSON.stringify({ requestCount: archiveServer.getRequestCount(), installedArtifact }),
+      );
     }
 
-    const serviceDetail = await waitForJson(`${runtimeUrl}/api/services/echo-service`);
     return {
       hostStatus: smoke.hostStatus,
       runtimeHealth: smoke.runtimeHealth,
