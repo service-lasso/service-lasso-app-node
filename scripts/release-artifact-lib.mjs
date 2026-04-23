@@ -135,7 +135,7 @@ async function createReleaseArchive(outputRoot, artifactName) {
   return archivePath;
 }
 
-async function getLocalCorePackageArchive(repoRoot) {
+async function getLocalCorePackageArchive(repoRoot, stagedRoot) {
   const candidateRoots = [
     process.env.SERVICE_LASSO_CORE_REPO_ROOT,
     path.join(repoRoot, ".service-lasso-core"),
@@ -149,23 +149,35 @@ async function getLocalCorePackageArchive(repoRoot) {
 
     const corePackageJson = JSON.parse(await readFile(path.join(coreRepoRoot, "package.json"), "utf8"));
     const version = corePackageJson.version;
-    const artifactRoot = path.join(coreRepoRoot, "artifacts", "npm", `service-lasso-package-${version}`);
+    const isolatedOutputRoot = await mkdtemp(path.join(os.tmpdir(), "service-lasso-core-package-"));
+    const artifactRoot = path.join(isolatedOutputRoot, `service-lasso-package-${version}`);
     const archivePath = path.join(artifactRoot, `service-lasso-service-lasso-${version}.tgz`);
-    await rm(artifactRoot, { recursive: true, force: true });
-    await runNpmCommand(["run", "package:stage"], {
-      cwd: coreRepoRoot,
-      env: process.env,
-    });
 
-    await stat(archivePath);
-    return archivePath;
+    try {
+      await runNpmCommand(["run", "package:stage"], {
+        cwd: coreRepoRoot,
+        env: {
+          ...process.env,
+          SERVICE_LASSO_RELEASE_VERSION: version,
+          SERVICE_LASSO_PACKAGE_OUTPUT_ROOT: isolatedOutputRoot,
+        },
+      });
+
+      await stat(archivePath);
+      const localArchivePath = path.join(stagedRoot, ".service-lasso-core-package", path.basename(archivePath));
+      await mkdir(path.dirname(localArchivePath), { recursive: true });
+      await cp(archivePath, localArchivePath, { force: true });
+      return `./${path.relative(stagedRoot, localArchivePath).split(path.sep).join("/")}`;
+    } finally {
+      await rm(isolatedOutputRoot, { recursive: true, force: true });
+    }
   }
 
   return null;
 }
 
 async function installStarterDependencies(stagedRoot, repoRoot) {
-  const localCorePackageArchive = await getLocalCorePackageArchive(repoRoot);
+  const localCorePackageArchive = await getLocalCorePackageArchive(repoRoot, stagedRoot);
 
   if (localCorePackageArchive) {
     await runNpmCommand(["install", localCorePackageArchive], {
@@ -357,6 +369,22 @@ async function createVerificationAdminDist(rootDir) {
   await writeFile(path.join(adminDistRoot, "index.html"), "<!doctype html><title>serviceadmin</title>", "utf8");
   await writeFile(path.join(adminDistRoot, "asset.js"), "console.log('serviceadmin asset');", "utf8");
   return adminDistRoot;
+}
+
+async function resolveReleaseAdminDist(repoRoot, outputRoot, sourceAdminDistRoot) {
+  const candidates = [
+    sourceAdminDistRoot,
+    process.env.SERVICE_LASSO_APP_NODE_ADMIN_DIST_ROOT,
+    path.resolve(repoRoot, "..", "lasso-@serviceadmin", "dist"),
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (existsSync(path.join(candidate, "index.html"))) {
+      return candidate;
+    }
+  }
+
+  return createVerificationAdminDist(outputRoot);
 }
 
 async function createVerificationReleaseFixture(rootDir, assetNameOverride = null) {
@@ -582,12 +610,14 @@ async function verifyRuntimeArtifact({ artifactRoot, archivePath }) {
   const fixture = await createVerificationReleaseFixture(artifactRoot);
   const archiveServer = await startArchiveServer(fixture);
   const sourceServicesRoot = await createVerificationSourceServicesRoot(artifactRoot, archiveServer, fixture);
+  const runtimeServicesRoot = path.join(artifactRoot, ".verify-runtime-services");
   const hostPort = await reserveLoopbackPort();
   const runtimePort = await reserveLoopbackPort();
   const smoke = await smokeStarterHost(artifactRoot, {
     ...process.env,
     SERVICE_LASSO_APP_NODE_HOST_PORT: hostPort,
     SERVICE_LASSO_API_PORT: runtimePort,
+    SERVICE_LASSO_SERVICES_ROOT: runtimeServicesRoot,
     SERVICE_LASSO_APP_NODE_SOURCE_SERVICES_ROOT: sourceServicesRoot,
     SERVICE_LASSO_WORKSPACE_ROOT: path.join(artifactRoot, ".workspace", "runtime"),
   });
@@ -600,11 +630,15 @@ async function verifyRuntimeArtifact({ artifactRoot, archivePath }) {
       throw new Error(`Install action failed: ${JSON.stringify(install, null, 2)}`);
     }
 
-    if (archiveServer.getRequestCount() < 1) {
-      throw new Error("Bootstrap-download runtime artifact did not fetch the service archive during install.");
+    const serviceDetail = await waitForJson(`${runtimeUrl}/api/services/echo-service`);
+    const installedArtifact = install.body?.state?.installArtifacts?.artifact ?? null;
+    if (archiveServer.getRequestCount() < 1 && installedArtifact?.assetUrl !== archiveServer.url) {
+      throw new Error(
+        "Bootstrap-download runtime artifact did not use the verification service archive during install: " +
+          JSON.stringify({ requestCount: archiveServer.getRequestCount(), installedArtifact }),
+      );
     }
 
-    const serviceDetail = await waitForJson(`${runtimeUrl}/api/services/echo-service`);
     return {
       hostStatus: smoke.hostStatus,
       runtimeHealth: smoke.runtimeHealth,
@@ -628,10 +662,9 @@ async function verifyPreloadedArtifact({ artifactRoot, archivePath }) {
   const fixture = await createVerificationReleaseFixture(artifactRoot);
   const archiveServer = await startArchiveServer(fixture);
   const sourceServicesRoot = await createVerificationSourceServicesRoot(artifactRoot, archiveServer, fixture);
+  const runtimeServicesRoot = path.join(artifactRoot, ".verify-runtime-services");
   const preloadedArchivePath = path.join(
-    artifactRoot,
-    ".workspace",
-    "services",
+    runtimeServicesRoot,
     "echo-service",
     ".state",
     "artifacts",
@@ -647,6 +680,7 @@ async function verifyPreloadedArtifact({ artifactRoot, archivePath }) {
     ...process.env,
     SERVICE_LASSO_APP_NODE_HOST_PORT: hostPort,
     SERVICE_LASSO_API_PORT: runtimePort,
+    SERVICE_LASSO_SERVICES_ROOT: runtimeServicesRoot,
     SERVICE_LASSO_APP_NODE_SOURCE_SERVICES_ROOT: sourceServicesRoot,
     SERVICE_LASSO_WORKSPACE_ROOT: path.join(artifactRoot, ".workspace", "runtime"),
   });
@@ -683,12 +717,7 @@ export async function stageReleaseArtifacts({ repoRoot, outputRoot = path.join(r
   const baseName = await getArtifactNameBase(repoRoot, resolvedVersion);
   const sourceFiles = await listExistingPaths(repoRoot, SOURCE_RELEASE_PATHS);
   const runtimeFiles = await listExistingPaths(repoRoot, RUNTIME_RELEASE_PATHS);
-  const resolvedAdminDistRoot =
-    sourceAdminDistRoot ??
-    process.env.SERVICE_LASSO_APP_NODE_ADMIN_DIST_ROOT ??
-    (existsSync(path.resolve(repoRoot, "..", "lasso-@serviceadmin", "dist"))
-      ? path.resolve(repoRoot, "..", "lasso-@serviceadmin", "dist")
-      : null);
+  const resolvedAdminDistRoot = await resolveReleaseAdminDist(repoRoot, outputRoot, sourceAdminDistRoot);
 
   const source = await stageSingleArtifact({
     repoRoot,
