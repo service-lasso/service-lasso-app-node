@@ -99,15 +99,12 @@ The release now proves:
 - bootstrap-download mode installs the service payload before first use
 - preloaded mode installs from an already-shipped archive without a first-run download
 
-## Private package note
+## Public package note
 
-This starter depends on the published private core package:
+This starter depends on the public npm core package:
 - `@service-lasso/service-lasso`
 
-For local or CI installs from GitHub Packages, provide a token with package read access through:
-- `NODE_AUTH_TOKEN`
-
-The repo `.npmrc` is included in the staged artifact so the starter knows which registry and scope to use.
+Local and CI installs resolve it from `https://registry.npmjs.org` without GitHub Packages auth.
 
 ## Commands
 
