@@ -33,7 +33,7 @@ Current local URLs:
 
 ## Current release artifact
 
-This starter repo now has bounded source, bootstrap-download, and preloaded/no-download release artifacts.
+This starter repo now has bounded source, bootstrap-download, and bundled/no-download release artifacts.
 
 Current local commands:
 - `npm test`
@@ -46,13 +46,16 @@ Current pipelines:
   - installs dependencies and runs `npm test`
 - `Release`
   - runs on pushes to `main` or by manual dispatch
-  - runs tests, verifies the artifact, uploads the packaged files, and creates or updates the rolling `latest` release on `main`
+  - runs tests, verifies the artifact, uploads the packaged files, and creates a `yyyy.m.d-<shortsha>` release on `main`
 
 Current shipped artifact contents are documented in:
 - `docs/release-artifact.md`
 
 Current honest label:
-- this repo ships a runnable plain-Node app-host starter plus explicit source, bootstrap-download, and preloaded runtime bundles
+- this repo ships a runnable plain-Node app-host starter plus explicit source, bootstrap-download, and bundled runtime artifacts
+
+Release versions from `main` follow the protected-branch pattern:
+- `yyyy.m.d-<shortsha>`
 
 ## Minimal POC
 
